@@ -1,0 +1,28 @@
+name: Sync Ménages → Guesty
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # toutes les 5 minutes
+  workflow_dispatch:         # bouton manuel dans GitHub si besoin
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 schedule
+
+      - name: Run sync
+        env:
+          WAC_EMAIL:    ${{ secrets.WAC_EMAIL }}
+          WAC_PASSWORD: ${{ secrets.WAC_PASSWORD }}
+          GUESTY_CLIENT_ID:     ${{ secrets.GUESTY_CLIENT_ID }}
+          GUESTY_CLIENT_SECRET: ${{ secrets.GUESTY_CLIENT_SECRET }}
+        run: python sync_menages.py

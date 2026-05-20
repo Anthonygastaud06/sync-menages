@@ -1,0 +1,9 @@
+{
+  "_comment": "Mapping White & Clean ID → Guesty Listing ID",
+  "_comment2": "WAC ID = chiffres dans l'URL /appartments/XXXX sur app.whiteandclean.fr",
+  "_comment3": "Guesty ID = chiffres dans l'URL de la fiche logement sur app.guesty.com",
+
+  "2329": "GUESTY_LISTING_ID_ICI",
+  "2330": "GUESTY_LISTING_ID_ICI",
+  "2331": "GUESTY_LISTING_ID_ICI"
+}
