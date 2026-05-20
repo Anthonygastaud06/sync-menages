@@ -24,7 +24,7 @@ from pathlib import Path
 import os
 WAC_EMAIL        = os.getenv("WAC_EMAIL", "ton_email@whiteandclean.fr")
 WAC_PASSWORD     = os.getenv("WAC_PASSWORD", "ton_mot_de_passe")
-WAC_LOGIN_URL    = "https://app.whiteandclean.fr/portal/login"
+WAC_LOGIN_URL    = "https://app.whiteandclean.fr/portal/customers/login"
 WAC_MISSIONS_URL = "https://app.whiteandclean.fr/portal/customers/missions/reporting"
 
 GUESTY_CLIENT_ID     = os.getenv("GUESTY_CLIENT_ID", "ton_client_id_guesty")
