@@ -10,8 +10,7 @@ Il scrape White & Clean, détecte les ménages terminés et met à jour Guesty a
 3. Détecte les missions terminées → classe CSS `bg-mission-completed`
 4. Récupère l'ID appartement WAC depuis l'URL `/appartments/XXXX`
 5. Mappe avec l'ID listing Guesty via `mapping.json`
-6. Cherche la réservation checkout du jour dans Guesty
-7. Met à jour housekeeping → `clean` via API Guesty
+6. Met à jour le statut de propreté du listing Guesty → `clean` (`PUT /v1/listings/{id}`)
 
 ## Structure HTML White & Clean
 ```html
@@ -40,7 +39,13 @@ Il scrape White & Clean, détecte les ménages terminés et met à jour Guesty a
    - `GUESTY_CLIENT_SECRET`
 5. Vérifier que le premier workflow se lance
 
-## API Guesty
-- Auth : `POST https://auth.guesty.com/oauth/token`
-- Réservations : `GET /v1/reservations?listingId=X&checkOutFrom=today&checkOutTo=today`
-- Housekeeping : `PUT /v1/reservations/{id}/housekeeping` → `{"status":"clean"}`
+## API Guesty (Open API)
+- Auth : `POST https://open-api.guesty.com/oauth2/token`
+  (form-urlencoded, `grant_type=client_credentials`, `scope=open-api`)
+  ⚠️ Max **5 tokens / 24h / clientId**, token valable 24h → mis en cache dans `.guesty_token.json`
+  (persisté entre les runs via `actions/cache`).
+- Lire le statut : `GET /v1/listings/{id}?fields=cleaningStatus`
+- Marquer le ménage fait : `PUT /v1/listings/{id}` → `{"cleaningStatus": {"value": "clean"}}`
+- Valeurs `cleaningStatus.value` : `clean` (Propre) · `dirty` (Sale) · `waiting_for_inspection` (En attente d'inspection) · `unknown` (Inconnu) · non défini
+
+> Note : le statut de ménage est porté par le **listing**, pas par la réservation.

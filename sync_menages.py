@@ -29,11 +29,14 @@ WAC_MISSIONS_URL = "https://app.whiteandclean.fr/portal/customers/missions/repor
 
 GUESTY_CLIENT_ID     = os.getenv("GUESTY_CLIENT_ID", "ton_client_id_guesty")
 GUESTY_CLIENT_SECRET = os.getenv("GUESTY_CLIENT_SECRET", "ton_client_secret_guesty")
-GUESTY_AUTH_URL      = "https://auth.guesty.com/oauth/token"
+GUESTY_AUTH_URL      = "https://open-api.guesty.com/oauth2/token"
 GUESTY_API_BASE      = "https://open-api.guesty.com/v1"
 
 # Fichier de mapping WAC ID → Guesty Listing ID
 MAPPING_FILE = Path(__file__).parent / "mapping.json"
+# Cache du token Guesty — ⚠️ Guesty limite à 5 tokens / 24h / clientId.
+# Le token (valable 24h) est donc persisté entre les runs (cf. cache GitHub Actions).
+TOKEN_CACHE  = Path(__file__).parent / ".guesty_token.json"
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -61,45 +64,69 @@ def load_mapping():
 # ─── GUESTY ───────────────────────────────────────────────────────────────────
 
 def get_guesty_token():
-    resp = requests.post(GUESTY_AUTH_URL, json={
-        "grant_type": "client_credentials",
-        "client_id": GUESTY_CLIENT_ID,
-        "client_secret": GUESTY_CLIENT_SECRET,
-    })
-    resp.raise_for_status()
-    log.info("✅ Token Guesty obtenu")
-    return resp.json()["access_token"]
+    """Récupère un token Guesty Open API, en réutilisant le cache si possible.
+    ⚠️ Guesty limite à 5 tokens / 24h / clientId : le cache est indispensable."""
+    if TOKEN_CACHE.exists():
+        try:
+            data = json.loads(TOKEN_CACHE.read_text())
+            if data.get("expires_at", 0) - time.time() > 600:  # marge 10 min
+                log.info("✅ Token Guesty (cache réutilisé)")
+                return data["access_token"]
+        except Exception:
+            pass  # cache illisible → on en redemande un
 
-
-def get_todays_reservation(token, listing_id):
-    today = date.today().isoformat()
-    resp = requests.get(
-        f"{GUESTY_API_BASE}/reservations",
-        headers={"Authorization": f"Bearer {token}"},
-        params={
-            "listingId": listing_id,
-            "checkOutFrom": today,
-            "checkOutTo": today,
-            "status": "confirmed",
-            "limit": 1,
-        }
+    resp = requests.post(
+        GUESTY_AUTH_URL,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data={
+            "grant_type": "client_credentials",
+            "scope": "open-api",
+            "client_id": GUESTY_CLIENT_ID,
+            "client_secret": GUESTY_CLIENT_SECRET,
+        },
     )
     resp.raise_for_status()
-    results = resp.json().get("results", [])
-    return results[0]["_id"] if results else None
+    payload = resp.json()
+    token = payload["access_token"]
+    expires_in = payload.get("expires_in", 86400)
+    try:
+        TOKEN_CACHE.write_text(json.dumps({
+            "access_token": token,
+            "expires_at": time.time() + expires_in,
+        }))
+    except Exception as e:
+        log.warning(f"   ⚠️  Cache token non écrit : {e}")
+    log.info("✅ Token Guesty obtenu (nouveau)")
+    return token
 
 
-def set_clean(token, reservation_id):
+def get_cleaning_status(token, listing_id):
+    """Retourne le cleaningStatus.value actuel du listing (clean/dirty/...)."""
+    resp = requests.get(
+        f"{GUESTY_API_BASE}/listings/{listing_id}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        params={"fields": "cleaningStatus"},
+    )
+    resp.raise_for_status()
+    return (resp.json().get("cleaningStatus") or {}).get("value")
+
+
+def set_listing_clean(token, listing_id):
+    """Passe le statut de propreté du listing à 'clean' (= 'Propre' dans Guesty)."""
     resp = requests.put(
-        f"{GUESTY_API_BASE}/reservations/{reservation_id}/housekeeping",
+        f"{GUESTY_API_BASE}/listings/{listing_id}",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         },
-        json={"status": "clean"}
+        json={"cleaningStatus": {"value": "clean"}},
     )
     resp.raise_for_status()
-    log.info(f"   🟢 Guesty → 'clean' (réservation {reservation_id})")
+    log.info(f"   🟢 Guesty listing {listing_id} → 'clean'")
 
 # ─── WHITE & CLEAN ────────────────────────────────────────────────────────────
 
@@ -174,12 +201,13 @@ def sync():
 
             log.info(f"🏠 WAC:{wac_id} → Guesty:{listing_id}")
 
-            reservation_id = get_todays_reservation(token, listing_id)
-            if not reservation_id:
-                log.warning(f"   ⚠️  Pas de réservation checkout aujourd'hui")
+            current = get_cleaning_status(token, listing_id)
+            if current == "clean":
+                log.info(f"   ✓ Déjà 'clean' — rien à faire")
+                already_synced.add(cache_key)
                 continue
 
-            set_clean(token, reservation_id)
+            set_listing_clean(token, listing_id)
             already_synced.add(cache_key)
 
     except Exception as e:

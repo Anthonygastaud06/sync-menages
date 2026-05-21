@@ -5,5 +5,6 @@ __pycache__/
 venv/
 .env
 sync_menages.log
+.guesty_token.json
 .DS_Store
 .claude/

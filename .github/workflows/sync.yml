@@ -19,6 +19,17 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 schedule
 
+      # Persiste le token Guesty entre les runs (quota : 5 tokens / 24h).
+      # Clé unique par run + restore-keys → cache "mutable" : on restaure le
+      # dernier token connu, et on resauvegarde le fichier à chaque run.
+      - name: Cache Guesty token
+        uses: actions/cache@v4
+        with:
+          path: .guesty_token.json
+          key: guesty-token-${{ github.run_id }}
+          restore-keys: |
+            guesty-token-
+
       - name: Run sync
         env:
           WAC_EMAIL:    ${{ secrets.WAC_EMAIL }}
