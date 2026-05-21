@@ -9,7 +9,7 @@ Il scrape White & Clean, détecte les ménages terminés et met à jour Guesty a
 2. Scrape `https://app.whiteandclean.fr/portal/customers/missions/reporting`
 3. Détecte les missions terminées → classe CSS `bg-mission-completed`
 4. Récupère l'ID appartement WAC depuis l'URL `/appartments/XXXX`
-5. Mappe avec l'ID listing Guesty via `mapping.json`
+5. Mappe avec l'ID listing Guesty via `mapping.csv`
 6. Met à jour le statut de propreté du listing Guesty → `clean` (`PUT /v1/listings/{id}`)
 
 ## Structure HTML White & Clean
@@ -25,8 +25,19 @@ Il scrape White & Clean, détecte les ménages terminés et met à jour Guesty a
 | Fichier | Rôle |
 |---|---|
 | `sync_menages.py` | Script principal |
-| `mapping.json` | WAC ID → Guesty Listing ID (à compléter) |
+| `mapping.csv` | WAC ID → Guesty Listing ID (2 colonnes, éditable sur GitHub) |
 | `.github/workflows/sync.yml` | GitHub Actions toutes les 5 min |
+
+## Ajouter / modifier un appartement
+Tout se passe dans `mapping.csv`, directement depuis le navigateur :
+1. Ouvre **https://github.com/Anthonygastaud06/sync-menages/blob/main/mapping.csv**
+2. Clique sur l'icône **crayon** (✏️ « Edit this file ») en haut à droite
+3. Ajoute une ligne à la fin, au format `id_wac,id_guesty` (ex. `2500,69e2241a7c2afe00139feb8b`)
+   - **ID WAC** = chiffres de l'URL `…/appartments/XXXX` sur White & Clean
+   - **ID Guesty** = chiffres de l'URL du logement dans Guesty
+   - Pour retirer un appart : supprime simplement sa ligne
+4. Bouton vert **« Commit changes »**
+5. C'est tout — le prochain run (sous 5 min) prend la modif en compte. Aucune virgule/guillemet à gérer.
 
 ## Ce qu'il faut faire
 1. Vérifier que Git et la CLI GitHub (`gh`) sont installés

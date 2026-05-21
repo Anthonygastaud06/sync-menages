@@ -11,6 +11,7 @@ Usage :
 
 import os
 import sys
+import csv
 import json
 import time
 import logging
@@ -35,8 +36,8 @@ GUESTY_CLIENT_SECRET = os.getenv("GUESTY_CLIENT_SECRET", "ton_client_secret_gues
 GUESTY_AUTH_URL      = "https://open-api.guesty.com/oauth2/token"
 GUESTY_API_BASE      = "https://open-api.guesty.com/v1"
 
-# Fichier de mapping WAC ID → Guesty Listing ID
-MAPPING_FILE = Path(__file__).parent / "mapping.json"
+# Fichier de mapping WAC ID → Guesty Listing ID (CSV : wac_id,guesty_id)
+MAPPING_FILE = Path(__file__).parent / "mapping.csv"
 # Cache du token Guesty — ⚠️ Guesty limite à 5 tokens / 24h / clientId.
 # Le token (valable 24h) est donc persisté entre les runs (cf. cache GitHub Actions).
 TOKEN_CACHE  = Path(__file__).parent / ".guesty_token.json"
@@ -84,10 +85,25 @@ HTTP = make_session()  # session partagée pour Guesty
 # ─── MAPPING ──────────────────────────────────────────────────────────────────
 
 def load_mapping():
-    with open(MAPPING_FILE) as f:
-        data = json.load(f)
-    # Ignore les clés _comment
-    return {k: v for k, v in data.items() if not k.startswith("_")}
+    """Lit mapping.csv → { wac_id: guesty_id }.
+    Ignore l'en-tête, les lignes vides, les commentaires (#) et les
+    appartements dont l'ID Guesty est vide."""
+    mapping = {}
+    with open(MAPPING_FILE, newline="", encoding="utf-8") as f:
+        for row in csv.reader(f):
+            if not row:
+                continue
+            wac = row[0].strip()
+            # Saute commentaires, en-tête et lignes vides
+            if not wac or wac.startswith("#") or wac.lower() in ("wac_id", "id wac"):
+                continue
+            guesty = row[1].strip() if len(row) > 1 else ""
+            if not guesty:
+                log.warning(f"   ⚠️  WAC {wac} sans ID Guesty dans le mapping — ignoré")
+                continue
+            mapping[wac] = guesty
+    log.info(f"🗺️  {len(mapping)} appartement(s) dans le mapping")
+    return mapping
 
 # ─── GUESTY ───────────────────────────────────────────────────────────────────
 
