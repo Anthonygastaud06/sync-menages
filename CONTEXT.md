@@ -54,10 +54,13 @@ cron-job.org  ──(POST API, toutes les 5 min)──▶  GitHub Actions (workf
 
 | Fichier | Rôle |
 |---|---|
-| `sync_menages.py` | Script principal |
+| `sync_menages.py` | Script principal (sync toutes les 5 min) |
+| `cleanup_cloudinary.py` | Supprime les photos Cloudinary de +90 j (lancé 1×/jour) |
 | `mapping.csv` | Correspondance ID WAC → ID Guesty (éditable sur GitHub) |
-| `.github/workflows/sync.yml` | Définition du job GitHub Actions |
+| `.github/workflows/sync.yml` | Job GitHub Actions de synchro (5 min) |
+| `.github/workflows/cleanup.yml` | Job GitHub Actions de nettoyage photos (1×/jour) |
 | `.gitignore` | Exclut le log et le cache de token |
+| `AJOUTER-UN-LOGEMENT.md` | Procédure simple pour ajouter un logement |
 | `CONTEXT.md` | Cette documentation |
 
 > `mapping.xlsx` (s'il est présent en local) est juste un brouillon, **non utilisé** par le script. La seule source de vérité est `mapping.csv`.

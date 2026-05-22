@@ -1,0 +1,28 @@
+name: Nettoyage photos Cloudinary
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # tous les jours vers 3h (UTC) — best-effort, ok pour du nettoyage
+  workflow_dispatch:        # bouton manuel
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Cleanup old photos
+        env:
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY:    ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CLEANUP_DAYS: "90"
+        run: python cleanup_cloudinary.py
