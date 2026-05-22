@@ -1,8 +1,11 @@
 # Projet sync-menages — Documentation complète
 
 > Synchronisation automatique : quand un ménage est marqué **terminé** sur
-> White & Clean, le logement correspondant passe automatiquement en **« Propre »**
-> (cleaningStatus = clean) dans Guesty.
+> White & Clean, côté Guesty on met à jour automatiquement :
+> - le **logement** → « Propre » (cleaningStatus = clean) ;
+> - la **tâche de ménage** du jour → « completed » (ce qui met aussi le logement en Propre) ;
+> - les **photos** de la mission → attachées à la tâche (ré-hébergées sur Cloudinary) ;
+> - le **commentaire** de la mission → ajouté en commentaire de la tâche (déclenche la notif Guesty).
 
 - **Repo GitHub** : https://github.com/Anthonygastaud06/sync-menages (public)
 - **Compte GitHub** : Anthonygastaud06
@@ -30,10 +33,20 @@ cron-job.org  ──(POST API, toutes les 5 min)──▶  GitHub Actions (workf
 1. Connexion à `app.whiteandclean.fr` (vérifie qu'on est réellement authentifié, pas juste un HTTP 200).
 2. Scrape `https://app.whiteandclean.fr/portal/customers/missions/reporting`.
 3. Détecte les missions terminées via la classe CSS `bg-mission-completed`.
-4. Récupère l'ID appartement WAC depuis l'URL `/appartments/XXXX`.
+4. Récupère l'ID appartement WAC + l'ID de mission (lien `/missions/reporting/XXXX`).
 5. Mappe vers l'ID listing Guesty via `mapping.csv`.
-6. Lit le statut actuel du listing ; s'il n'est pas déjà `clean`, fait
-   `PUT /v1/listings/{id}` avec `{"cleaningStatus": {"value": "clean"}}`.
+6. Met le listing en `clean` si besoin (`PUT /v1/listings/{id}`).
+7. Cherche la **tâche de ménage Guesty du jour** (`GET /v1/tasks` filtré par `listingId` + `dateForSort`).
+   Si elle existe, en **un seul PUT** :
+   - statut → `completed` (Guesty repasse aussi le logement en `clean`) ;
+   - **photos** : récupérées sur la page mission (`…/images/missions/…`), envoyées sur Cloudinary,
+     puis ajoutées au tableau `attachments` (dédup par nom de fichier) ;
+   - **commentaire** : le commentaire WAC est ajouté dans `comments` avec le préfixe `[WAC]` (dédup par texte).
+8. Tout est **idempotent** : aux runs suivants, ce qui est déjà fait n'est pas refait
+   (pas de photo en double, pas de re-complétion, pas de re-commentaire).
+
+> Si une mission n'a **pas** de tâche Guesty ce jour-là, seul le `cleaningStatus` du
+> logement est mis à jour (photos/commentaire/complétion sont simplement ignorés sans erreur).
 
 ---
 
@@ -128,6 +141,12 @@ Ils sont **chiffrés** et invisibles, même si le repo est public.
 | `WAC_PASSWORD` | Mot de passe White & Clean |
 | `GUESTY_CLIENT_ID` | Client ID de l'intégration OAuth Guesty |
 | `GUESTY_CLIENT_SECRET` | Client Secret Guesty |
+| `CLOUDINARY_CLOUD_NAME` | Cloud name Cloudinary (ré-hébergement des photos) |
+| `CLOUDINARY_API_KEY` | API Key Cloudinary |
+| `CLOUDINARY_API_SECRET` | API Secret Cloudinary |
+
+> Les 3 secrets Cloudinary sont **optionnels** : s'ils sont absents, la synchro des
+> photos est ignorée (le reste — cleaningStatus, complétion de tâche, commentaire — continue).
 
 **Mettre à jour un secret** (ex. après rotation d'un mot de passe) :
 ```bash
@@ -150,6 +169,25 @@ gh secret set GUESTY_CLIENT_SECRET --repo Anthonygastaud06/sync-menages
 
 > Le statut de ménage est porté par le **listing**, pas par la réservation.
 
+**Tâches de ménage (cleaning tasks) :**
+- **Chercher** : `GET /v1/tasks?filters=[…]` — filtres en JSON, ex. :
+  `[{"field":"listingId","operator":"$eq","value":"<id>"},
+    {"field":"dateForSort","operator":"$gte","value":"<jour>T00:00:00.000Z"},
+    {"field":"dateForSort","operator":"$lte","value":"<jour>T23:59:59.999Z"}]`
+- **Mettre à jour** : `PUT /v1/tasks/{id}` avec un corps combinant les champs :
+  - `status` ∈ `pending, confirmed, in progress, completed, canceled`
+    → passer à **`completed`** met aussi le logement en `clean` (effet automatique Guesty).
+  - `attachments` : tableau `[{url, title, mimetype}]` — accepte des **URLs externes**
+    (le PUT **remplace** tout le tableau → renvoyer l'existant + les nouvelles).
+  - `comments` : tableau `[{text}]` — le PUT **remplace** aussi tout le tableau.
+- ⚠️ Pas d'endpoint d'ajout unitaire (POST …/comments → 404) : on relit puis on renvoie le tableau complet.
+
+**Cloudinary (ré-hébergement photos) :**
+- `POST https://api.cloudinary.com/v1_1/{cloud}/image/upload` (signed) — paramètre `file`
+  = URL externe (Cloudinary va chercher l'image), `public_id` déterministe + `overwrite=true`
+  (idempotent), `signature` = SHA1 de `overwrite=true&public_id=…&timestamp=…` + API secret.
+- Renvoie `secure_url` (URL publique permanente) → c'est elle qu'on attache à la tâche.
+
 ---
 
 ## 8. White & Clean — référence technique
@@ -166,8 +204,19 @@ Exemple de structure HTML :
   <a href="/portal/customers/appartments/2329">
     <span>12 BOULEVARD JEAN JAURÈS 06300 NICE</span>
   </a>
+  <a href="/portal/customers/missions/reporting/102594"> … </a>
 </div>
 ```
+
+**Page détail d'une mission** : `…/missions/reporting/{mission_id}`
+- **Photos** : dans des `<div class="gallery"><a href="…/images/missions/{id}/….jpg">…`.
+  Elles sont **publiques** (accessibles sans login) et **permanentes** (pas d'expiration).
+- **Commentaire** : dans la carte dont le `<h5 class="card-title">` vaut « Commentaire »
+  (le texte est le contenu de la `card-body` moins le titre). Vide → pas de commentaire.
+
+> Note : les photos de **référence d'un appartement** (page `/appartments/{id}`) sont, elles,
+> sur DigitalOcean Spaces avec des URLs **signées qui expirent en 5h** — ce ne sont PAS les
+> photos de mission (qui sont sur `app.whiteandclean.fr/images/missions/…`, permanentes).
 
 ---
 

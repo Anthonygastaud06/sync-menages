@@ -14,6 +14,7 @@ import sys
 import csv
 import json
 import time
+import hashlib
 import logging
 
 import requests
@@ -36,6 +37,14 @@ GUESTY_CLIENT_SECRET = os.getenv("GUESTY_CLIENT_SECRET", "ton_client_secret_gues
 GUESTY_AUTH_URL      = "https://open-api.guesty.com/oauth2/token"
 GUESTY_API_BASE      = "https://open-api.guesty.com/v1"
 
+# Cloudinary : ré-hébergement permanent des photos de ménage.
+# Si ces 3 variables sont absentes, la synchro des photos est simplement ignorée
+# (la mise à jour du cleaningStatus continue de fonctionner).
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_API_KEY    = os.getenv("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
+SYNC_PHOTOS = bool(CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET)
+
 # Fichier de mapping WAC ID → Guesty Listing ID (CSV : wac_id,guesty_id)
 MAPPING_FILE = Path(__file__).parent / "mapping.csv"
 # Cache du token Guesty — ⚠️ Guesty limite à 5 tokens / 24h / clientId.
@@ -57,8 +66,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Cache journalier en mémoire (évite les doublons dans le mode --loop)
-already_synced = set()
 # Token Guesty gardé en mémoire pour la durée du process
 _token = None
 
@@ -193,6 +200,54 @@ def set_listing_clean(listing_id):
     )
     log.info(f"   🟢 Guesty listing {listing_id} → 'clean'")
 
+
+def find_cleaning_task(listing_id, day):
+    """Retrouve la tâche de ménage Guesty d'un listing pour une date donnée
+    (jour ISO 'YYYY-MM-DD'). Renvoie la tâche (dict) ou None."""
+    filters = json.dumps([
+        {"field": "listingId",   "operator": "$eq",  "value": listing_id},
+        {"field": "dateForSort", "operator": "$gte", "value": f"{day}T00:00:00.000Z"},
+        {"field": "dateForSort", "operator": "$lte", "value": f"{day}T23:59:59.999Z"},
+    ])
+    resp = guesty_request("GET", "/tasks", params={"filters": filters, "limit": 25})
+    results = resp.json().get("results", [])
+    cleaning = [t for t in results if t.get("type") == "cleaning"]
+    pool = cleaning or results
+    return pool[0] if pool else None
+
+
+def update_task(task_id, payload):
+    """Met à jour une tâche Guesty (status / attachments / comments) en un seul PUT."""
+    guesty_request(
+        "PUT",
+        f"/tasks/{task_id}",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+    )
+
+# ─── CLOUDINARY ───────────────────────────────────────────────────────────────
+
+def cloudinary_upload(image_url, public_id):
+    """Envoie une image (par URL) sur Cloudinary et renvoie son URL permanente.
+    Idempotent : même public_id → écrase, pas de doublon."""
+    ts = str(int(time.time()))
+    to_sign = f"overwrite=true&public_id={public_id}&timestamp={ts}"
+    signature = hashlib.sha1((to_sign + CLOUDINARY_API_SECRET).encode()).hexdigest()
+    resp = HTTP.post(
+        f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload",
+        data={
+            "file": image_url,
+            "api_key": CLOUDINARY_API_KEY,
+            "timestamp": ts,
+            "public_id": public_id,
+            "overwrite": "true",
+            "signature": signature,
+        },
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()["secure_url"]
+
 # ─── WHITE & CLEAN ────────────────────────────────────────────────────────────
 
 def login_wac():
@@ -218,10 +273,10 @@ def login_wac():
     return session
 
 
-def get_completed_wac_ids(session):
+def get_completed_missions(session):
     """
-    Retourne la liste des IDs d'appartements WAC
-    dont la mission est terminée (bg-mission-completed).
+    Retourne la liste des missions terminées (bg-mission-completed) :
+    [{wac_id, mission_id, name}].
     """
     resp = session.get(WAC_MISSIONS_URL, timeout=TIMEOUT, allow_redirects=True)
     resp.raise_for_status()
@@ -234,18 +289,116 @@ def get_completed_wac_ids(session):
     completed = soup.find_all("div", class_="bg-mission-completed")
     log.info(f"🔍 {len(completed)} mission(s) terminée(s)")
 
-    wac_ids = []
+    missions = []
     for mission in completed:
         apt_link = mission.find("a", href=lambda h: h and "/appartments/" in h)
-        if apt_link:
-            wac_id = apt_link["href"].split("/appartments/")[-1].strip("/")
-            # Récupère aussi le nom pour le log
-            span = apt_link.find("span")
-            name = span.get_text(strip=True) if span else wac_id
-            log.info(f"   📍 {name} (WAC ID: {wac_id})")
-            wac_ids.append(wac_id)
+        if not apt_link:
+            continue
+        wac_id = apt_link["href"].split("/appartments/")[-1].strip("/")
+        span = apt_link.find("span")
+        name = span.get_text(strip=True) if span else wac_id
 
-    return wac_ids
+        # Lien vers le détail de la mission (porte les photos) : …/missions/reporting/{id}
+        det = mission.find("a", href=lambda h: h and "/missions/reporting/" in h)
+        mission_id = det["href"].rstrip("/").split("/")[-1] if det else None
+
+        log.info(f"   📍 {name} (WAC {wac_id}, mission {mission_id})")
+        missions.append({"wac_id": wac_id, "mission_id": mission_id, "name": name})
+
+    return missions
+
+
+def get_mission_details(session, mission_id):
+    """Récupère depuis la page détail d'une mission : ses photos + son commentaire.
+    Photos WAC = publiques et permanentes (app.whiteandclean.fr/images/missions/…)."""
+    resp = session.get(f"{WAC_MISSIONS_URL}/{mission_id}", timeout=TIMEOUT, allow_redirects=True)
+    resp.raise_for_status()
+    if "login" in resp.url.lower():
+        raise Exception("❌ Session White & Clean non authentifiée (détail mission → login)")
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Photos (galeries baguetteBox)
+    photos = []
+    for a in soup.select("div.gallery a[href]"):
+        href = a["href"].strip()
+        if "/images/missions/" not in href:
+            continue
+        if href.startswith("/"):
+            href = "https://app.whiteandclean.fr" + href
+        if href not in photos:
+            photos.append(href)
+
+    # Commentaire : carte dont le titre <h5> est "Commentaire"
+    comment = ""
+    for h5 in soup.find_all("h5", class_="card-title"):
+        if "commentaire" in h5.get_text(strip=True).lower():
+            body = h5.find_parent("div", class_="card-body")
+            if body:
+                txt = body.get_text(" ", strip=True)
+                # retire le mot-titre "Commentaire" en début
+                if txt.lower().startswith("commentaire"):
+                    txt = txt[len("commentaire"):].strip()
+                comment = txt
+            break
+
+    return {"photos": photos, "comment": comment}
+
+def sync_task(session, mission, listing_id):
+    """Sur la tâche de ménage Guesty du jour : statut 'completed' + photos + commentaire
+    de la mission WAC. Tout en un seul PUT, idempotent."""
+    mission_id = mission.get("mission_id")
+    if not mission_id:
+        log.warning("   ⚠️  Pas d'ID de mission — tâche non synchronisée")
+        return
+
+    task = find_cleaning_task(listing_id, date.today().isoformat())
+    if not task:
+        log.warning(f"   ⚠️  Pas de tâche Guesty aujourd'hui pour {listing_id} — tâche/photos/commentaire non synchronisés")
+        return
+
+    details = get_mission_details(session, mission_id)
+    payload = {}
+    changes = []
+
+    # 1) Statut → completed (Guesty passe alors le logement en 'Propre' automatiquement)
+    if task.get("status") != "completed":
+        payload["status"] = "completed"
+        changes.append("statut→completed")
+
+    # 2) Photos → Cloudinary puis attachées (dédup par nom de fichier)
+    if SYNC_PHOTOS and details["photos"]:
+        existing = [{"url": a.get("url"), "title": a.get("title"),
+                     "mimetype": a.get("mimetype", "image/jpeg")}
+                    for a in (task.get("attachments") or []) if a.get("url")]
+        existing_titles = {a["title"] for a in existing}
+        new_atts = []
+        for url in details["photos"]:
+            title = url.split("?")[0].rstrip("/").split("/")[-1]
+            if title in existing_titles:
+                continue
+            public_id = f"wac_menages/{mission_id}/{title.rsplit('.', 1)[0]}"
+            new_atts.append({"url": cloudinary_upload(url, public_id),
+                             "title": title, "mimetype": "image/jpeg"})
+        if new_atts:
+            payload["attachments"] = existing + new_atts
+            changes.append(f"{len(new_atts)} photo(s)")
+
+    # 3) Commentaire WAC → commentaire de la tâche (préfixe [WAC], dédup par texte)
+    if details["comment"]:
+        marker = f"[WAC] {details['comment']}"
+        existing_comments = task.get("comments") or []
+        if not any((c.get("text") or "") == marker for c in existing_comments):
+            kept = [{"text": c.get("text")} for c in existing_comments if c.get("text")]
+            payload["comments"] = kept + [{"text": marker}]
+            changes.append("commentaire")
+
+    if not payload:
+        log.info("   ✓ Tâche déjà à jour")
+        return
+
+    update_task(task["_id"], payload)
+    log.info(f"   ✅ Tâche {task['_id']} : {', '.join(changes)}")
 
 # ─── SYNC ─────────────────────────────────────────────────────────────────────
 
@@ -253,41 +406,41 @@ def sync():
     """Retourne True si tout s'est bien passé, False en cas d'erreur."""
     log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     log.info("🔄 Synchronisation...")
+    if not SYNC_PHOTOS:
+        log.info("ℹ️  Synchro photos désactivée (secrets Cloudinary absents)")
 
     # Étapes globales : toute erreur ici est fatale pour ce run.
     try:
         mapping = load_mapping()
         session = login_wac()
-        wac_ids = get_completed_wac_ids(session)
+        missions = get_completed_missions(session)
     except Exception as e:
         log.error(f"❌ Erreur : {e}", exc_info=True)
         return False
 
-    if not wac_ids:
+    if not missions:
         log.info("✓ Aucune mission terminée")
         return True
 
-    # Traitement par logement, isolé : un échec n'arrête pas les autres.
+    # Traitement par mission, isolé : un échec n'arrête pas les autres.
     errors = []
-    for wac_id in wac_ids:
-        cache_key = f"{date.today().isoformat()}_{wac_id}"
-        if cache_key in already_synced:
-            log.info(f"   ⏭️  WAC {wac_id} déjà synchronisé aujourd'hui")
-            continue
-
+    for m in missions:
+        wac_id = m["wac_id"]
         listing_id = mapping.get(wac_id)
         if not listing_id:
-            log.warning(f"   ⚠️  WAC ID {wac_id} absent du mapping.json — à ajouter")
+            log.warning(f"   ⚠️  WAC ID {wac_id} absent du mapping.csv — à ajouter")
             errors.append(wac_id)
             continue
 
         try:
             log.info(f"🏠 WAC:{wac_id} → Guesty:{listing_id}")
+            # 1) Statut de propreté du logement (toujours — couvre le cas sans tâche)
             if get_cleaning_status(listing_id) == "clean":
-                log.info("   ✓ Déjà 'clean' — rien à faire")
+                log.info("   ✓ Logement déjà 'clean'")
             else:
                 set_listing_clean(listing_id)
-            already_synced.add(cache_key)
+            # 2) Tâche Guesty du jour : completed + photos + commentaire
+            sync_task(session, m, listing_id)
         except Exception as e:
             log.error(f"   ❌ Échec WAC {wac_id} → listing {listing_id} : {e}")
             errors.append(wac_id)
