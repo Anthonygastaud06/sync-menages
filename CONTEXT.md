@@ -1,11 +1,17 @@
 # Projet sync-menages — Documentation complète
 
-> Synchronisation automatique : quand un ménage est marqué **terminé** sur
-> White & Clean, côté Guesty on met à jour automatiquement :
+> **Sens 1 — Ménage terminé (toutes les 5 min).** Quand un ménage est marqué
+> **terminé** sur White & Clean, côté Guesty on met à jour automatiquement :
 > - le **logement** → « Propre » (cleaningStatus = clean) ;
 > - la **tâche de ménage** du jour → « completed » (ce qui met aussi le logement en Propre) ;
 > - les **photos** de la mission → attachées à la tâche (ré-hébergées sur Cloudinary) ;
 > - le **commentaire** de la mission → ajouté en commentaire de la tâche (déclenche la notif Guesty).
+>
+> **Sens 2 — Lendemain d'arrivée (1×/jour).** Tout logement Guesty dont un
+> voyageur est **arrivé la veille** (check-in = J-1) repasse automatiquement en
+> **« Sale »** (cleaningStatus = dirty). Basé sur les **réservations Guesty**, donc
+> couvre **tous les logements** (pas seulement ceux du mapping WAC). Idempotent :
+> un logement déjà « sale » n'est pas remodifié.
 
 - **Repo GitHub** : https://github.com/Anthonygastaud06/sync-menages (public)
 - **Compte GitHub** : Anthonygastaud06
@@ -54,10 +60,11 @@ cron-job.org  ──(POST API, toutes les 5 min)──▶  GitHub Actions (workf
 
 | Fichier | Rôle |
 |---|---|
-| `sync_menages.py` | Script principal (sync toutes les 5 min) |
+| `sync_menages.py` | Script principal. Sans option : sync « propre » (5 min). `--dirty` : passage en « sale » des arrivées de la veille (1×/jour) |
 | `cleanup_cloudinary.py` | Supprime les photos Cloudinary de +90 j (lancé 1×/jour) |
 | `mapping.csv` | Correspondance ID WAC → ID Guesty (éditable sur GitHub) |
-| `.github/workflows/sync.yml` | Job GitHub Actions de synchro (5 min) |
+| `.github/workflows/sync.yml` | Job GitHub Actions de synchro « propre » (5 min) |
+| `.github/workflows/dirty.yml` | Job GitHub Actions « lendemain d'arrivée → sale » (1×/jour) |
 | `.github/workflows/cleanup.yml` | Job GitHub Actions de nettoyage photos (1×/jour) |
 | `.gitignore` | Exclut le log et le cache de token |
 | `AJOUTER-UN-LOGEMENT.md` | Procédure simple pour ajouter un logement |
@@ -131,6 +138,22 @@ appeler l'API GitHub toutes les 5 min de façon fiable.
 - **Permissions → Actions = Read and write**
 - Expiration max 1 an → **à renouveler** avant expiration (sinon le déclencheur tombe en 401)
 
+### 5 bis. Déclencheur du job « lendemain d'arrivée → sale » (1×/jour)
+
+Le workflow `dirty.yml` a un cron GitHub (`0 6 * * *`) mais, comme pour la synchro,
+GitHub peut le **sauter** certains jours. Comme la fenêtre ne vise que **J-1**, un
+jour manqué n'est jamais rattrapé → un logement occupé resterait « propre ».
+On crée donc un **2ᵉ cronjob** sur cron-job.org, identique au premier mais :
+- **URL** : `https://api.github.com/repos/Anthonygastaud06/sync-menages/actions/workflows/dirty.yml/dispatches`
+  (note : `dirty.yml`, pas `sync.yml`)
+- **Schedule** : 1×/jour le matin (ex. 6h00). On peut le déclencher **2-3×/matin**
+  (ex. 6h, 9h, 12h) : c'est idempotent (même J-1, on ignore les listings déjà « sale »),
+  ça ne fait que multiplier les chances que ça parte vraiment.
+- **Méthode / Corps / Headers** : identiques au cronjob de synchro (`{"ref":"main"}`,
+  même token GitHub avec permission Actions Read and write).
+
+> Le même token GitHub couvre les deux workflows du repo.
+
 ---
 
 ## 6. Secrets GitHub Actions
@@ -191,6 +214,16 @@ gh secret set GUESTY_CLIENT_SECRET --repo Anthonygastaud06/sync-menages
   (idempotent), `signature` = SHA1 de `overwrite=true&public_id=…&timestamp=…` + API secret.
 - Renvoie `secure_url` (URL publique permanente) → c'est elle qu'on attache à la tâche.
 
+**Réservations (pour le passage en « sale ») :**
+- **Chercher les arrivées d'un jour** : `GET /v1/reservations?filters=[…]&fields=…&limit=100&skip=…`
+  Filtre sur la **date d'arrivée localisée** :
+  `[{"operator":"$eq","field":"checkInDateLocalized","value":"YYYY-MM-DD"}]`
+  (format `YYYY-MM-DD`, date locale du logement). Pagination par `limit`/`skip` (max 100).
+- Champs utiles : `listingId`, `status`, `checkInDateLocalized`, `confirmationCode`.
+- Statuts **ignorés** (pas de réelle arrivée) : `canceled`, `declined`, `expired`, `inquiry`.
+- Pour chaque listing trouvé : `PUT /v1/listings/{id}` → `{"cleaningStatus":{"value":"dirty"}}`
+  (seulement si pas déjà `dirty` → idempotent).
+
 ---
 
 ## 8. White & Clean — référence technique
@@ -242,8 +275,9 @@ Exemple de structure HTML :
 ```bash
 pip install requests beautifulsoup4 schedule
 export WAC_EMAIL=... WAC_PASSWORD=... GUESTY_CLIENT_ID=... GUESTY_CLIENT_SECRET=...
-python sync_menages.py            # une fois (exit 1 si erreur)
+python sync_menages.py            # sync "propre" une fois (exit 1 si erreur)
 python sync_menages.py --loop     # boucle toutes les 5 min (machine allumée requise)
+python sync_menages.py --dirty    # passe en "Sale" les arrivées de la veille (J-1)
 ```
 
 ---

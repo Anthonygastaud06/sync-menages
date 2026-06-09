@@ -4,9 +4,13 @@ sync_menages.py
 Scrape White & Clean, détecte les missions terminées (fond vert)
 et passe le statut de propreté (cleaningStatus) du listing Guesty à "clean".
 
+En mode --dirty (job quotidien) : passe en "Sale" tout logement Guesty dont
+un voyageur est arrivé la veille (check-in = J-1).
+
 Usage :
-    python sync_menages.py              # une fois (exit 1 si erreur → alerte CI)
+    python sync_menages.py              # sync "propre" une fois (exit 1 si erreur → alerte CI)
     python sync_menages.py --loop       # boucle toutes les 5 min (local)
+    python sync_menages.py --dirty      # passe en "Sale" les arrivées de la veille (1×/jour)
 """
 
 import os
@@ -22,7 +26,7 @@ import schedule
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
@@ -199,6 +203,59 @@ def set_listing_clean(listing_id):
         json={"cleaningStatus": {"value": "clean"}},
     )
     log.info(f"   🟢 Guesty listing {listing_id} → 'clean'")
+
+
+def set_listing_dirty(listing_id):
+    """Passe le statut de propreté du listing à 'dirty' (= 'Sale' dans Guesty)."""
+    guesty_request(
+        "PUT",
+        f"/listings/{listing_id}",
+        headers={"Content-Type": "application/json"},
+        json={"cleaningStatus": {"value": "dirty"}},
+    )
+    log.info(f"   🔴 Guesty listing {listing_id} → 'dirty'")
+
+
+# Statuts de réservation à ignorer : pas de réelle arrivée de voyageur.
+RESERVATION_SKIP_STATUSES = {"canceled", "cancelled", "declined", "expired", "inquiry"}
+
+
+def get_arrivals(day):
+    """Retourne les ID de listings dont une réservation a son check-in le jour
+    'day' (ISO 'YYYY-MM-DD'), via le champ localisé checkInDateLocalized.
+    Exclut les réservations annulées / non confirmées. Gère la pagination."""
+    listing_ids = []
+    skip = 0
+    while True:
+        filters = json.dumps([
+            {"operator": "$eq", "field": "checkInDateLocalized", "value": day},
+        ])
+        resp = guesty_request(
+            "GET", "/reservations",
+            params={
+                "filters": filters,
+                "fields": "listingId status checkInDateLocalized confirmationCode",
+                "limit": 100,
+                "skip": skip,
+                "sort": "_id",
+            },
+        )
+        results = resp.json().get("results", [])
+        if not results:
+            break
+        for r in results:
+            status = (r.get("status") or "").lower()
+            if status in RESERVATION_SKIP_STATUSES:
+                continue
+            lid = r.get("listingId")
+            if isinstance(lid, dict):       # parfois objet listing complet
+                lid = lid.get("_id") or lid.get("id")
+            if lid and lid not in listing_ids:
+                listing_ids.append(lid)
+        if len(results) < 100:
+            break
+        skip += 100
+    return listing_ids
 
 
 def find_cleaning_task(listing_id, day):
@@ -452,9 +509,53 @@ def sync():
     log.info("✓ Terminé sans erreur")
     return True
 
+# ─── SYNC "SALE" (lendemain d'arrivée) ─────────────────────────────────────────
+
+def sync_dirty():
+    """Passe en 'Sale' tout logement Guesty dont un voyageur est arrivé HIER
+    (check-in = J-1). À lancer une fois par jour. Couvre TOUS les logements
+    Guesty (basé sur les réservations, pas sur le mapping WAC).
+    Idempotent : un logement déjà 'dirty' n'est pas remodifié.
+    Retourne True si OK, False en cas d'erreur."""
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    log.info(f"🔴 Mise en 'Sale' des arrivées du {yesterday} (J-1)...")
+
+    try:
+        listing_ids = get_arrivals(yesterday)
+    except Exception as e:
+        log.error(f"❌ Erreur lecture des réservations : {e}", exc_info=True)
+        return False
+
+    log.info(f"🔍 {len(listing_ids)} logement(s) avec une arrivée hier")
+    if not listing_ids:
+        log.info("✓ Aucune arrivée hier")
+        return True
+
+    errors = []
+    for listing_id in listing_ids:
+        try:
+            if get_cleaning_status(listing_id) == "dirty":
+                log.info(f"   ✓ Listing {listing_id} déjà 'dirty'")
+            else:
+                set_listing_dirty(listing_id)
+        except Exception as e:
+            log.error(f"   ❌ Échec listing {listing_id} : {e}")
+            errors.append(listing_id)
+
+    if errors:
+        log.error(f"✗ Terminé avec {len(errors)} erreur(s) : {', '.join(errors)}")
+        return False
+
+    log.info("✓ Terminé sans erreur")
+    return True
+
 # ─── LANCEMENT ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    if "--dirty" in sys.argv:
+        # Mise en "Sale" des arrivées de la veille (job quotidien).
+        sys.exit(0 if sync_dirty() else 1)
     if "--loop" in sys.argv:
         log.info("🔁 Boucle toutes les 5 minutes (Ctrl+C pour arrêter)")
         sync()

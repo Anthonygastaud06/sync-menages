@@ -1,0 +1,36 @@
+name: Logements → Sale (lendemain d'arrivée)
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # tous les jours vers 6h UTC (8h Paris l'été, 7h l'hiver)
+  workflow_dispatch:        # bouton manuel
+
+jobs:
+  dirty:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 schedule
+
+      # Partage le même cache de token Guesty que la synchro "propre"
+      # (quota : 5 tokens / 24h).
+      - name: Cache Guesty token
+        uses: actions/cache@v4
+        with:
+          path: .guesty_token.json
+          key: guesty-token-${{ github.run_id }}
+          restore-keys: |
+            guesty-token-
+
+      - name: Run dirty sync
+        env:
+          GUESTY_CLIENT_ID:     ${{ secrets.GUESTY_CLIENT_ID }}
+          GUESTY_CLIENT_SECRET: ${{ secrets.GUESTY_CLIENT_SECRET }}
+        run: python sync_menages.py --dirty
