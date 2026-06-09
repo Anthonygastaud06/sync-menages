@@ -5,6 +5,11 @@ on:
     - cron: "0 3 * * *"   # tous les jours vers 3h (UTC) — best-effort, ok pour du nettoyage
   workflow_dispatch:        # bouton manuel
 
+# Opte dès maintenant pour le runtime Node 24 des actions (Node 20 déprécié
+# par GitHub, forcé au 16/06/2026). Supprime l'avertissement de dépréciation.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest

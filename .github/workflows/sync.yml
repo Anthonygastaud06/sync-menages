@@ -5,6 +5,11 @@ on:
     - cron: "*/5 * * * *"   # toutes les 5 minutes
   workflow_dispatch:         # bouton manuel dans GitHub si besoin
 
+# Opte dès maintenant pour le runtime Node 24 des actions (Node 20 déprécié
+# par GitHub, forcé au 16/06/2026). Supprime l'avertissement de dépréciation.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   sync:
     runs-on: ubuntu-latest
