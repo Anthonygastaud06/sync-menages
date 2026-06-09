@@ -64,7 +64,7 @@ cron-job.org  ──(POST API, toutes les 5 min)──▶  GitHub Actions (workf
 | `cleanup_cloudinary.py` | Supprime les photos Cloudinary de +90 j (lancé 1×/jour) |
 | `mapping.csv` | Correspondance ID WAC → ID Guesty (éditable sur GitHub) |
 | `.github/workflows/sync.yml` | Job GitHub Actions de synchro « propre » (5 min) |
-| `.github/workflows/dirty.yml` | Job GitHub Actions « lendemain d'arrivée → sale » (1×/jour) |
+| `.github/workflows/dirty.yml` | « lendemain d'arrivée → sale » — bouton manuel + filet de secours (le déclenchement quotidien fiable est greffé sur `sync.yml`, cf. §5 bis) |
 | `.github/workflows/cleanup.yml` | Job GitHub Actions de nettoyage photos (1×/jour) |
 | `.gitignore` | Exclut le log et le cache de token |
 | `AJOUTER-UN-LOGEMENT.md` | Procédure simple pour ajouter un logement |
@@ -138,21 +138,28 @@ appeler l'API GitHub toutes les 5 min de façon fiable.
 - **Permissions → Actions = Read and write**
 - Expiration max 1 an → **à renouveler** avant expiration (sinon le déclencheur tombe en 401)
 
-### 5 bis. Déclencheur du job « lendemain d'arrivée → sale » (1×/jour)
+### 5 bis. Déclenchement du passage en « sale » (1×/jour) — sans cron-job.org
 
-Le workflow `dirty.yml` a un cron GitHub (`0 6 * * *`) mais, comme pour la synchro,
-GitHub peut le **sauter** certains jours. Comme la fenêtre ne vise que **J-1**, un
-jour manqué n'est jamais rattrapé → un logement occupé resterait « propre ».
-On crée donc un **2ᵉ cronjob** sur cron-job.org, identique au premier mais :
-- **URL** : `https://api.github.com/repos/Anthonygastaud06/sync-menages/actions/workflows/dirty.yml/dispatches`
-  (note : `dirty.yml`, pas `sync.yml`)
-- **Schedule** : 1×/jour le matin (ex. 6h00). On peut le déclencher **2-3×/matin**
-  (ex. 6h, 9h, 12h) : c'est idempotent (même J-1, on ignore les listings déjà « sale »),
-  ça ne fait que multiplier les chances que ça parte vraiment.
-- **Méthode / Corps / Headers** : identiques au cronjob de synchro (`{"ref":"main"}`,
-  même token GitHub avec permission Actions Read and write).
+Le passage en « sale » (lendemain d'arrivée) **ne dépend d'aucun cronjob dédié**.
+Il est **greffé sur la synchro 5 min déjà fiable** : pendant la fenêtre
+`DIRTY_HOUR_UTC` (par défaut **6h UTC**), chaque run de `sync.yml` lance aussi
+`sync_dirty()`. Comme la synchro tourne toutes les 5 min, ~12 runs tombent dans
+cette heure ; c'est **idempotent** (un logement déjà « sale » est ignoré), donc
+ces relances multiples n'ont aucun effet de bord et garantissent qu'au moins un
+run passe vraiment, même si GitHub en saute quelques-uns.
 
-> Le même token GitHub couvre les deux workflows du repo.
+- **Avantage** : rien à configurer en plus — ça hérite du déclencheur cron-job.org
+  existant (celui de la synchro 5 min). Pas de 2ᵉ cronjob, pas de 2ᵉ token.
+- **Changer l'heure** : variable d'env `DIRTY_HOUR_UTC` (ex. `8` pour 8h UTC).
+  À ajouter dans `sync.yml` sous `env:` si besoin (sinon 6h par défaut).
+
+Le workflow **`dirty.yml`** reste disponible comme **bouton manuel** (onglet Actions
+→ « Run workflow ») et comme **filet de secours** quotidien (cron GitHub `0 6 * * *`),
+mais il n'est plus indispensable au fonctionnement.
+
+> ⚠️ Conséquence : la synchro 5 min porte désormais les **secrets Guesty** (déjà
+> présents) et son code de retour devient rouge si le passage en « sale » échoue
+> pendant la fenêtre. C'est voulu (alerte mail).
 
 ---
 

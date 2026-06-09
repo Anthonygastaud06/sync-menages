@@ -26,7 +26,7 @@ import schedule
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
@@ -57,6 +57,14 @@ TOKEN_CACHE  = Path(__file__).parent / ".guesty_token.json"
 
 # Délai max (s) avant d'abandonner une requête HTTP qui pend.
 TIMEOUT = 30
+
+# Heure (UTC) pendant laquelle la synchro 5 min déclenche AUSSI le passage en
+# "sale" des arrivées de la veille (J-1). On profite du déclencheur 5 min déjà
+# fiable (cron-job.org) : pendant cette heure, chaque run lance sync_dirty().
+# C'est idempotent (logement déjà 'dirty' → ignoré), donc le relancer ~12×
+# dans l'heure n'a aucun effet de bord. Évite d'avoir à créer un 2e cronjob.
+# 6h UTC ≈ 8h Paris (été) / 7h (hiver).
+DIRTY_HOUR_UTC = int(os.getenv("DIRTY_HOUR_UTC", "6"))
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -459,14 +467,13 @@ def sync_task(session, mission, listing_id):
 
 # ─── SYNC ─────────────────────────────────────────────────────────────────────
 
-def sync():
-    """Retourne True si tout s'est bien passé, False en cas d'erreur."""
-    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    log.info("🔄 Synchronisation...")
+def sync_clean():
+    """Synchro 'propre' : WAC terminé → Guesty clean + tâche/photos/commentaire.
+    Retourne True si tout s'est bien passé, False en cas d'erreur."""
     if not SYNC_PHOTOS:
         log.info("ℹ️  Synchro photos désactivée (secrets Cloudinary absents)")
 
-    # Étapes globales : toute erreur ici est fatale pour ce run.
+    # Étapes globales : toute erreur ici est fatale pour cette synchro.
     try:
         mapping = load_mapping()
         session = login_wac()
@@ -503,11 +510,30 @@ def sync():
             errors.append(wac_id)
 
     if errors:
-        log.error(f"✗ Terminé avec {len(errors)} erreur(s) : {', '.join(errors)}")
+        log.error(f"✗ Synchro 'propre' : {len(errors)} erreur(s) : {', '.join(errors)}")
         return False
 
-    log.info("✓ Terminé sans erreur")
+    log.info("✓ Synchro 'propre' terminée sans erreur")
     return True
+
+
+def sync():
+    """Run principal (toutes les 5 min) : synchro 'propre', et — une fois par
+    jour pendant la fenêtre DIRTY_HOUR_UTC — passage en 'sale' des arrivées de
+    la veille. Retourne True si tout est OK, False sinon."""
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info("🔄 Synchronisation...")
+
+    clean_ok = sync_clean()
+
+    # Le passage en "sale" (J-1) est indépendant de WAC : on le tente même si la
+    # synchro 'propre' a échoué. Idempotent → sans danger si relancé dans l'heure.
+    dirty_ok = True
+    if datetime.now(timezone.utc).hour == DIRTY_HOUR_UTC:
+        log.info(f"🕖 Fenêtre {DIRTY_HOUR_UTC}h UTC → passage en 'sale' des arrivées de la veille")
+        dirty_ok = sync_dirty()
+
+    return clean_ok and dirty_ok
 
 # ─── SYNC "SALE" (lendemain d'arrivée) ─────────────────────────────────────────
 
